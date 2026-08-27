@@ -7,12 +7,12 @@ export type Social = {
   label: string;
   href: string;
   /** Key into ICONS in components/site-footer.tsx */
-  icon: "x" | "discord" | "marketplace";
+  icon: "x" | "discord" | "github";
 };
 
-/** From the collection metadata in the piggy-image-composer export. */
+/** Kept in sync with the footer links in ../website (lib/site.ts). */
 export const SOCIALS: Social[] = [
-  { label: "X", href: "https://twitter.com/PiggySolGang", icon: "x" },
-  { label: "Discord", href: "https://discord.gg/QyUHFsZnuJ", icon: "discord" },
-  { label: "piggygang.com", href: "https://piggygang.com/", icon: "marketplace" },
+  { label: "X", href: "https://x.com/PiggySolGang", icon: "x" },
+  { label: "Discord", href: "https://discord.gg/8SjGR8Srvz", icon: "discord" },
+  { label: "GitHub", href: "https://github.com/piggygang", icon: "github" },
 ];
