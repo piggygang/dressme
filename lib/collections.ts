@@ -1,13 +1,12 @@
-import { GENERATED } from "./collections.generated";
+import { GENERATED, INDEXER_COLLECTIONS } from "./collections.generated";
 import type {
   CategoryId,
   GeneratedCategory,
-  GeneratedCollection,
   GeneratedTrait,
   LayerStep,
   TraitId,
 } from "./collection-types";
-import type { CoreQuery } from "./solana-rpc";
+import type { IndexerQuery } from "./indexer";
 
 export type { CategoryId, LayerStep, Rect, TraitId } from "./collection-types";
 
@@ -17,18 +16,12 @@ export type Category = Omit<GeneratedCategory, "traits"> & { traits: Trait[] };
 /** Equipped trait **slug** per category; `null` means the slot is empty. */
 export type Equipped = Record<CategoryId, string | null>;
 
-/** SPL source: intersect the wallet's mints with the committed mints.txt. */
-export type MintsSource = { kind: "mints" } & NonNullable<GeneratedCollection["mints"]>;
-
 /**
- * Metaplex Core source: ask DAS which assets of `collection` the wallet holds.
- * An asset's on-chain name "#N" IS the token id into tokens.txt — the endpoint
- * is trusted for which ids are held, never for what they are.
+ * Which Indexer collection answers "what does this wallet hold here", and the
+ * id range an answer has to land in. All three resolve the same way now, so
+ * there is nothing left to discriminate on.
  */
-export type CoreSource = { kind: "core"; collection: string };
-
-/** Exactly one per collection — hydrate() fails the build if both inputs exist. */
-export type WalletSource = MintsSource | CoreSource;
+export type WalletSource = IndexerQuery;
 
 export type ReadyCollection = {
   status: "ready";
@@ -52,6 +45,10 @@ export type ReadyCollection = {
   tokens: { path: string; stride: number; firstId: number; count: number };
   /** How a connected wallet's holdings resolve here; `null` disables the wallet UI. */
   wallet: WalletSource | null;
+  /** Are the official minted renders published for this collection? */
+  hasRenders: boolean;
+  /** Does this collection have un-swapped siblings to point holders at? */
+  swapHint: boolean;
 };
 
 export type ComingSoonCollection = {
@@ -76,8 +73,17 @@ const PRESENTATION: Record<
     tagline: string;
     accent: string;
     tabOrder: CategoryId[];
-    /** Metaplex Core collection whose assets are this collection's swapped tokens. */
-    core?: string;
+    /**
+     * The Indexer collection this one's holdings come from. Omit to disable the
+     * wallet UI. Hand-authored, so `pnpm assets:check` asserts every slug named
+     * here is one the Indexer actually serves — an unknown slug is answered
+     * `200` with no rows, which would read as "you own none" forever.
+     */
+    indexer?: string;
+    /** Are the official minted renders published? See scripts/upload-renders.mjs. */
+    renders?: boolean;
+    /** Point holders at the sibling collection their un-swapped piggies sit in. */
+    swapHint?: boolean;
   }
 > = {
   "piggy-sol-gang": {
@@ -85,12 +91,16 @@ const PRESENTATION: Record<
     tagline: "Ten thousand piggies, straight off the chain.",
     accent: "#9945ff",
     tabOrder: ["body", "eyes", "mouth", "clothes", "head", "earring", "background"],
+    indexer: "piggy-sol-gang",
+    renders: true,
   },
   "piggy-girl-gang": {
     name: "Piggy Girl Gang",
     tagline: "Pretty, fierce and dressed for it.",
     accent: "#ff8ec4",
     tabOrder: ["body", "eyes", "mouth", "clothes", "hair", "hats", "earring", "background"],
+    indexer: "piggy-girl-gang",
+    renders: true,
   },
   "piggy-gang": {
     name: "Piggy Gang",
@@ -99,10 +109,13 @@ const PRESENTATION: Record<
     // badge uses, and an accent indistinguishable from a badge reads as a bug.
     accent: "#3ddad7",
     tabOrder: ["body", "eyes", "mouth", "clothes", "head", "earring", "special", "background"],
-    // On-chain CollectionV1 "Piggy Gang". Swapping burns the SOL Gang piggy and
-    // mints a Core asset named "#N" — the same token id tokens.txt already keys,
-    // which is why a live lookup can still resolve to committed trait data.
-    core: "J3nHgSDJj6CPj2ypuDWNuvuiYii965RcSmFAPQVDWA18",
+    // The Metaplex Core collection swapping mints into. Its assets are named
+    // "#N" — the same token id tokens.txt already keys, which is why a live
+    // lookup still resolves to committed trait data.
+    indexer: "piggy-gang",
+    // Deliberately no `renders`: the bucket holds the art this redraw replaced,
+    // so every request would 404 before falling back to the compositor.
+    swapHint: true,
   },
 };
 
@@ -136,17 +149,25 @@ function hydrate(slug: string): ReadyCollection {
   }
   categories.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 
-  // A collection resolves wallet holdings from exactly one source. The two
-  // inputs live in different layers (generated mints, hand-authored core), so
-  // the type cannot forbid both — fail the build here instead, like tabOrder.
-  if (generated.mints && presentation.core) {
-    throw new Error(`${slug}: declares both a mint index and a Core collection`);
+  // An unknown collection slug is answered 200 with no rows, so a typo here
+  // would show every holder "you own none of these" forever with a green build.
+  // Checked against the registry the importer captured, like tabOrder above.
+  if (presentation.indexer && !INDEXER_COLLECTIONS.includes(presentation.indexer)) {
+    throw new Error(
+      `${slug}: indexer collection "${presentation.indexer}" is not one the API serves `
+        + `(${INDEXER_COLLECTIONS.join(", ")})`,
+    );
   }
-  const wallet: WalletSource | null = generated.mints
-    ? { kind: "mints", ...generated.mints }
-    : presentation.core
-      ? { kind: "core", collection: presentation.core }
-      : null;
+
+  // Holdings come back as token numbers, so the id range they must land in is
+  // the committed token index's — never the other way round.
+  const wallet: WalletSource | null = presentation.indexer
+    ? {
+      slug: presentation.indexer,
+      firstId: generated.tokens.firstId,
+      count: generated.tokens.count,
+    }
+    : null;
 
   return {
     status: "ready",
@@ -167,6 +188,8 @@ function hydrate(slug: string): ReadyCollection {
     rarityCurve: generated.rarityCurve,
     tokens: generated.tokens,
     wallet,
+    hasRenders: Boolean(presentation.renders),
+    swapHint: Boolean(presentation.swapHint),
   };
 }
 
@@ -186,19 +209,15 @@ export function getReadyCollection(slug: string): ReadyCollection | undefined {
 }
 
 /**
- * Every Core collection any ready collection resolves wallets against, with
- * the id range its asset names must land in. The wallet provider reads this
- * once at module load to know which DAS queries a connected address needs.
+ * Every Indexer collection the app resolves wallets against, with the id range
+ * a holding has to land in. The wallet provider reads this once at module load,
+ * so one read covers every collection and moving between them costs nothing.
  */
-export function coreQueries(): CoreQuery[] {
-  const seen = new Map<string, CoreQuery>();
+export function walletQueries(): WalletSource[] {
+  const seen = new Map<string, WalletSource>();
   for (const collection of READY) {
-    if (collection.wallet?.kind === "core" && !seen.has(collection.wallet.collection)) {
-      seen.set(collection.wallet.collection, {
-        collection: collection.wallet.collection,
-        firstId: collection.tokens.firstId,
-        count: collection.tokens.count,
-      });
+    if (collection.wallet && !seen.has(collection.wallet.slug)) {
+      seen.set(collection.wallet.slug, collection.wallet);
     }
   }
   return [...seen.values()];

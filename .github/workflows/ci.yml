@@ -32,3 +32,10 @@ jobs:
       - run: pnpm exec next typegen && pnpm exec tsc --noEmit
 
       - run: pnpm build
+
+      # The look-code wire format now depends on trait counts served by the
+      # Indexer, so drift there would silently repoint every ?look= link. Three
+      # requests, no art tree. Non-blocking: an Indexer outage must not fail an
+      # unrelated PR — this reports, and the importer's own pin enforces.
+      - run: pnpm assets:check
+        continue-on-error: true

@@ -6,10 +6,14 @@
  *     --source <piggy-image-composer> \
  *     --art piggy-gang=<Piggy_Gang_New_Art_Files> \
  *     [--verify 8] [--renders piggy-sol-gang=<dir>]
+ *     [--indexer <url>] [--refresh] [--accept-hash]
  *
  * All three collections are metadata collections: traits, names and per-token
- * looks come from a HowRare export, so all three get real rarity and a token
- * index. They differ in how a metadata value finds its art:
+ * looks come from the PiggyGang Indexer (see indexer-items.mjs), so all three
+ * get real rarity and a token index. `--source` supplies the layer art and the
+ * reference renders `--verify` diffs against, not the metadata.
+ *
+ * They differ in how a metadata value finds its art:
  *
  *   implied — the value IS the trait name and kebabify(value) IS the filename.
  *     The two minted collections, unchanged.
@@ -32,16 +36,29 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
+import { loadItems } from "./indexer-items.mjs";
+import {
+  ALPHABET,
+  COLLECTIONS,
+  assert,
+  attrsOf,
+  buildCategory,
+  codeHashOf,
+  codeOrderOf,
+  dirSlug,
+  entryOf,
+  fail,
+  hasNoneArt,
+  keyOf,
+} from "./collection-config.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const THUMB = 256;
-/** Longest base58 encoding of a 32-byte Solana address. Rows are padded to it. */
-const MINT_WIDTH = 44;
 const ALPHA_CUTOFF = 8;
 const FOCUS_PAD = 0.12;
 /**
@@ -51,270 +68,15 @@ const FOCUS_PAD = 0.12;
  */
 const FOCUS_MIN = 0.5;
 const SRGB = "/System/Library/ColorSync/Profiles/sRGB Profile.icc";
-
-/** Look-code alphabet: 64 chars, every one unreserved in RFC 3986. */
-const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
-
-/** Joins a multi-attribute lookup key. Asserted absent from every value. */
-const SEP = " | ";
-
-/**
- * Piggy Gang is Piggy SOL Gang re-skinned — the delivered art carries no
- * metadata of its own, and `Piggy Trait Mapping.xlsx` is what ties it back to
- * the mint. These tables are that spreadsheet: old SOL Gang metadata value on
- * the left, new trait name on the right.
- *
- * SOL Gang's single Earring slot splits in two. The five in PG_SPECIAL are
- * full-canvas companions and props — wings, smoke, a shotgun, an owl, a
- * gangster — not ear jewellery; the sheet marks them "Category change", and
- * they need their own z-slot to sit behind the body. Each half declares the
- * other half's values as `empty`, which is what lets the partition assertion
- * prove the split is exact.
- */
-const PG_EARRING = {
-  Amulet: "Diamond",
-  "Gold Ring": "Gold Ring",
-  Palette: "Ear Tag",
-  "Red Diamond": "Pink Diamond",
-  Solana: "Solana",
-};
-const PG_SPECIAL = {
-  Earth: "Wingman",
-  Gun: "Shotgun",
-  Kiss: "Angel Wings",
-  Weed: "Smoke",
-  Western: "Mr. Lovo",
-};
-
-const COLLECTIONS = [
-  {
-    slug: "piggy-sol-gang",
-    meta: "piggy-sol-gang.json",
-    layers: "piggy-sol-gang-layers",
-    renders: "piggy-sol-gang-images",
-    canvas: 1080,
-    // These mints are this collection's own, so emit the wallet sidecar.
-    wallet: true,
-    stack: [
-      "Background",
-      "Body",
-      "Clothes",
-      "BodyRightEar",
-      "BodyHead",
-      "Head",
-      "BodyLeftEar",
-      "Eyes",
-      "Earring",
-      "Mouth",
-    ],
-    derived: { BodyHead: "Body", BodyLeftEar: "Body", BodyRightEar: "Body" },
-    categories: ["Background", "Body", "Clothes", "Eyes", "Mouth", "Head", "Earring"],
-    labels: { Body: "Skin", Head: "Headwear" },
-    // A stale near-duplicate of Head/ that the composer's layer order never
-    // reads. Named here so the "nothing goes silently unimported" scan passes.
-    skipDirs: ["Head Accesories"],
-    expectedDead: [
-      "Body/outline",
-      "BodyHead/outline",
-      "BodyRightEar/outline",
-      "Head/blue",
-      "Head/green",
-      "Head/outline",
-      "Head/pink",
-      "Head/purple",
-      "Head/salmon",
-      "Head/solana",
-      "Head/yellow",
-    ],
-  },
-  {
-    slug: "piggy-girl-gang",
-    meta: "piggy-girl-gang.json",
-    layers: "piggy-girl-gang-layers",
-    renders: "piggy-girl-gang-images",
-    canvas: 1080,
-    wallet: true,
-    stack: [
-      "Background",
-      "Body",
-      "Clothes",
-      "BodyRightEar",
-      "BodyHead",
-      "Hair",
-      "Hats",
-      "BodyLeftEar",
-      "Eyes",
-      "Earring",
-      "Mouth",
-    ],
-    derived: { BodyHead: "Body", BodyLeftEar: "Body", BodyRightEar: "Body" },
-    categories: ["Background", "Body", "Clothes", "Eyes", "Mouth", "Hair", "Hats", "Earring"],
-    labels: { Body: "Skin", Hats: "Hat" },
-    // Clothes "None" HAS art in this collection (a censored bar) — see the
-    // none-art probe in traitResolver. Give it a real name.
-    traitLabels: { Clothes: { None: "Censored" } },
-    skipDirs: [],
-    expectedDead: [],
-  },
-  {
-    slug: "piggy-gang",
-    // The same 10,000 tokens as SOL Gang, wearing redrawn art. There is no
-    // separate metadata export and none is needed: the token -> trait
-    // assignment IS SOL Gang's, translated by the `map` tables below.
-    // Deliberately no `wallet`: these mints belong to SOL Gang, so the sidecar
-    // would be a byte-identical duplicate and a held piggy would list twice.
-    meta: "piggy-sol-gang.json",
-    // Delivered outside the composer repo, as the folder of category dirs
-    // itself — hence `--art piggy-gang=<dir>`.
-    layers: ".",
-    externalArt: true,
-    // 2000px Display P3 at 300dpi. Converted to sRGB or the browser paints the
-    // wrong colours; shipped at native size.
-    canvas: 2000,
-    convert: true,
-    // Named after the UI name, apostrophes written as "_".
-    fileOf: (name) => `${name.replace(/'/g, "_")}.PNG`,
-    // No `renders`: piggy-sol-gang-images/ renders the OLD art, so there is
-    // nothing here a pixel-diff could prove. The order was derived by eye —
-    // Special under Body so Angel Wings sits behind the shoulders, the rest
-    // following the verified SOL order with the derived ear layers dropped
-    // (Body here is one flat sprite already containing the head and both ears).
-    stack: ["Background", "Special", "Body", "Clothes", "Head", "Eyes", "Earring", "Mouth"],
-    derived: {},
-    categories: [
-      {
-        name: "Background",
-        map: { Blue: "Blue", Cyan: "Cyan", Green: "Green", Orange: "Orange",
-          Purple: "Purple", Red: "Red", Yellow: "Yellow" },
-      },
-      {
-        name: "Special",
-        from: "Earring",
-        attrs: ["Earring"],
-        map: PG_SPECIAL,
-        empty: ["None", ...Object.keys(PG_EARRING)],
-        // Smoke and Angel Wings are full-canvas, so the union bbox this would
-        // otherwise compute is the whole frame and the small props render as
-        // smudges. Framed on those props instead; the full tier is untouched.
-        focus: { x: 0, y: 0.4, w: 0.55, h: 0.55 },
-      },
-      {
-        name: "Body",
-        label: "Skin",
-        // "Received Mud" is a SOL Gang trait its art never drew. Here it does,
-        // so the body is keyed on both. Spelled out rather than wildcarded, so
-        // you can read off that mud only changes Pink and Salmon.
-        attrs: ["Body", "Received Mud"],
-        map: {
-          "Alien | No": "Alien", "Alien | Yes": "Alien",
-          "Solana | No": "Solana", "Solana | Yes": "Solana",
-          "Zombie | No": "Zombie", "Zombie | Yes": "Zombie",
-          "Purple | No": "Dino", "Purple | Yes": "Dino",
-          "Yellow | No": "Leopard", "Yellow | Yes": "Leopard",
-          "Pink | No": "Pink", "Pink | Yes": "Boar",
-          "Salmon | No": "Salmon", "Salmon | Yes": "Mud Splash",
-        },
-      },
-      {
-        name: "Clothes",
-        empty: ["None"],
-        map: {
-          "Artist Apron": "Butcher's Apron", Blanket: "Blanket",
-          "Bone Necklace": "Bone Necklace", "Fancy Sweater": "Tux",
-          "Piggy Tee": "Hoodie", "Pink Leather Jacket": "Biker Leather Jacket",
-          "Pocket Watch": "Cyberpunk Jacket", "Purple Shirt": "Prison Suit",
-          "Red Jacket": "Tracksuit", "Rich Jacket": "Pimp Coat",
-          Singlet: "Singlet", "Solana Tee": "Solana Tee", "Star Tee": "Hawaiian Tee",
-        },
-      },
-      {
-        name: "Head",
-        label: "Headwear",
-        empty: ["None"],
-        map: {
-          "Afro Hair": "Hawk's Nest", "Afro Tail": "Dreads", Beanie: "Beanie",
-          Beret: "Chef's Hat", "Cowboy Hat": "Cowboy Hat", "Elf Hat": "Trucker Hat",
-          Fedora: "Cap", Fez: "Durag", "Fisherman Hat": "Straw Hat", Halo: "Halo",
-          "Ice Cream": "Ice Cream", "Leprechaun Hat": "Pimp Hat",
-          "Mohawk Hair": "Mohawk", Mushroom: "Fly Halo", "Officer Cap": "Pork Patrol",
-          "Party Hat": "Bucket Hat", "Propeller Hat": "Propeller Hat",
-          "Red Hair": "Medusa", "Royal Crown": "Royal Crown", "Sailor Cap": "Pirate Hat",
-          "Santa Cap": "Biker Hat", "Spiky Hair": "Robohawk", Unicorn: "Unicorn",
-        },
-      },
-      {
-        name: "Eyes",
-        map: {
-          "3d Glasses": "Oinkulus", Beaten: "Scar", Closed: "Pimp Glasses",
-          Coin: "Coin", Crying: "Tear Drop Tattoos",
-          "Dollar Sign Googles": "Dollar Sign Glasses",
-          // The artist typed "Focuses" on the file. Ship the real name.
-          Focused: { name: "Focused", file: "Focuses.PNG" },
-          "Heart Eyes": "Urban Frames Glasses", High: "High", Hypnotize: "White Glow",
-          Laser: "Laser", Monocle: "Terminator", Open: "Open",
-          Sleeping: "Viper Glasses", "Star Eyes": "Pork Patrol", Wink: "Wink",
-        },
-      },
-      {
-        name: "Earring",
-        map: PG_EARRING,
-        empty: ["None", ...Object.keys(PG_SPECIAL)],
-      },
-      {
-        name: "Mouth",
-        map: {
-          Annoyed: "Nose Ring", Beaten: "Muzzle", "Biting Brush": "Butcher's Knife",
-          "Bubble Gum": "Apple", Braces: "Diamond Grills", Cigarette: "Cigarette",
-          "Golden Teeth": "Golden Teeth", Lick: "Coin", Neutral: "Neutral",
-          "Party Horn": "Pipe", Smiling: "Smiling", Weed: "Blunt",
-        },
-      },
-    ],
-    // `Other /` (note the trailing space) is an uncategorised drawer of loose
-    // extras and alternate takes with camera-roll filenames. Left out until
-    // someone names and files them.
-    skipDirs: ["Other "],
-    // The classic piggy, rather than the modal Salmon, behind trait thumbnails.
-    mannequin: "pink",
-    expectedDead: [],
-  },
-];
+const DEFAULT_INDEXER = "https://api.indexer.piggygang.net";
 
 // ---------------------------------------------------------------- utilities
 
-function fail(message) {
-  console.error(`\n  ERROR  ${message}\n`);
-  process.exit(1);
-}
-
-function assert(condition, message) {
-  if (!condition) fail(message);
-}
-
-/** Byte-for-byte port of kebabify() in the composer's src/main.rs. */
-function kebabify(value) {
-  let out = "";
-  let lastDash = false;
-  for (const ch of value) {
-    const c = ch.toLowerCase();
-    if (/[a-z0-9]/.test(c) && c.charCodeAt(0) < 128) {
-      out += c;
-      lastDash = false;
-    } else if (!lastDash) {
-      out += "-";
-      lastDash = true;
-    }
-  }
-  return out.endsWith("-") ? out.slice(0, -1) : out;
-}
-
-const isNone = (value) => value === "None" || value === "No";
-
-/** PascalCase source dir -> lowercase kebab public path segment. */
-const dirSlug = (name) => kebabify(name.replace(/([a-z0-9])([A-Z])/g, "$1-$2"));
-
 function parseArgs(argv) {
-  const args = { source: null, art: {}, verify: 0, renders: {} };
+  const args = {
+    source: null, art: {}, verify: 0, renders: {},
+    indexer: DEFAULT_INDEXER, refresh: false, acceptHash: false,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--source") {
       // The composer repo. `meta` and `renders` always resolve under it.
@@ -332,8 +94,20 @@ function parseArgs(argv) {
       // only survive inside piggy-sol-gang-images.zip).
       const [slug, dir] = String(argv[++i]).split("=");
       args.renders[slug] = dir;
+    } else if (argv[i] === "--indexer") {
+      // Where per-token metadata comes from. The default is production.
+      args.indexer = String(argv[++i] ?? "");
+    } else if (argv[i] === "--refresh") {
+      // Ignore .cache/indexer and sweep the API again.
+      args.refresh = true;
+    } else if (argv[i] === "--accept-hash") {
+      // Deliberately changing the look-code wire format — see the pins below.
+      args.acceptHash = true;
+    } else {
+      fail(`unknown argument: ${argv[i]}`);
     }
   }
+  assert(args.indexer, "--indexer needs a URL");
   return args;
 }
 
@@ -442,141 +216,37 @@ function blendOver(dst, src) {
 
 // -------------------------------------------------------------------- build
 
-/** The metadata-attribute tuple a category keys on, joined into one string. */
-function keyOf(config, item, attrs) {
-  const by = new Map((item.attributes ?? []).map((attr) => [attr.name, attr.value]));
-  return attrs
-    .map((name) => {
-      const value = by.get(name);
-      assert(value !== undefined, `${config.slug}: token ${item.name} has no "${name}" attribute`);
-      assert(!value.includes(SEP), `${config.slug}: value "${value}" contains the key separator`);
-      return value;
-    })
-    .join(SEP);
-}
-
-/**
- * Per-category lookup from a metadata key to the art it wears, or null for an
- * empty slot. Two flavours:
- *
- *   declared — `map` names, for every value the metadata can hold, the new
- *     display name (and the file, where the artist misspelled it); `empty`
- *     names the values that deliberately have no art. Between them they must
- *     partition the observed values exactly, so a new or misspelt value is a
- *     hard error rather than a silently empty slot.
- *   implied — no `map`: the value IS the display name and kebabify(value) IS
- *     the file stem, with "None"/"No" empty unless the dir ships art for it.
- *     What the minted collections have always done.
- *
- * The two key the slug differently, deliberately. Implied slugs come from the
- * raw metadata value, so a display-name override can never repoint a shared
- * link. Declared slugs come from the new name, because for redrawn art the new
- * name is the public identity and the old value is only a join key.
- */
-function traitResolver(config, entry, layerDir) {
-  if (entry.map) {
-    const fileOf = config.fileOf ?? ((name) => `${kebabify(name)}.png`);
-    const declared = new Map(Object.entries(entry.map).map(([key, value]) => {
-      const art = typeof value === "string" ? { name: value } : value;
-      return [key, { name: art.name, slug: kebabify(art.name), file: art.file ?? fileOf(art.name) }];
-    }));
-    return {
-      declared: new Set([...declared.keys(), ...(entry.empty ?? [])]),
-      of: (key) => declared.get(key) ?? null,
-    };
-  }
-
-  // Without a table there is nothing to join a tuple on, so a multi-attribute
-  // category would silently kebabify "Pink | No" into a nonsense filename.
-  assert(!entry.attrs || entry.attrs.length === 1,
-    `${config.slug}: ${entry.name} keys on ${entry.attrs?.length} attributes but has no map`);
-
-  // Does an empty slot have art? Girl Gang's Clothes "None" paints a censored
-  // bar, and the shipped renders prove it (the composer's current None-skip
-  // postdates them). Where the file exists, "None" is a real trait.
-  const hasNoneArt = ["none", "no"].some((stem) => fs.existsSync(path.join(layerDir, `${stem}.png`)));
-  return {
-    declared: null,
-    of: (value) => (isNone(value) && !hasNoneArt ? null : {
-      name: config.traitLabels?.[entry.name]?.[value] ?? value,
-      slug: kebabify(value),
-      file: `${kebabify(value)}.png`,
-    }),
-  };
-}
-
-function buildCollection(config, sourceDir, artDir) {
+function buildCollection(config, artDir, items) {
   const layersDir = path.join(artDir, config.layers);
-  const metaPath = path.join(sourceDir, config.meta);
   assert(fs.existsSync(layersDir), `missing layers dir: ${layersDir}`);
-  assert(fs.existsSync(metaPath), `missing metadata: ${metaPath}`);
-
-  const items = JSON.parse(fs.readFileSync(metaPath, "utf8")).result.data.items;
   const supply = items.length;
 
   const categories = config.categories.map((raw) => {
-    const entry = typeof raw === "string" ? { name: raw } : raw;
-    const srcDir = entry.from ?? entry.name;
-    const dir = path.join(layersDir, srcDir);
+    const entry = entryOf(raw);
+    const dir = path.join(layersDir, entry.from ?? entry.name);
     assert(fs.existsSync(dir), `${config.slug}: missing layer dir ${dir}`);
 
-    const attrs = entry.attrs ?? [entry.name];
-    const resolver = traitResolver(config, entry, dir);
+    // `noneArt` decides whether an empty value is a real trait, which sets a
+    // look-code slot's width — so it is declared in config and merely checked
+    // here. Probing for the file instead would let a deleted PNG silently
+    // renumber every trait in the slot.
+    const noneOnDisk = ["none", "no"]
+      .some((stem) => fs.existsSync(path.join(dir, `${stem}.png`)));
+    assert(entry.map || noneOnDisk === hasNoneArt(config, entry),
+      `${config.slug}: ${entry.name} — noneArt says ${hasNoneArt(config, entry)} but `
+        + `${noneOnDisk ? "none.png exists" : "there is no none.png"} in ${dir}`);
 
     // Tally the key tuples first, then resolve — several keys can land on one
     // trait (Purple|No and Purple|Yes both wear Dino).
     const observed = new Map();
     for (const item of items) {
-      const key = keyOf(config, item, attrs);
+      const key = keyOf(config, item, attrsOf(entry));
       observed.set(key, (observed.get(key) ?? 0) + 1);
     }
 
-    if (resolver.declared) {
-      for (const key of observed.keys()) {
-        assert(resolver.declared.has(key),
-          `${config.slug}: ${entry.name} — metadata value "${key}" is in neither map nor empty`);
-      }
-      for (const key of resolver.declared) {
-        assert(observed.has(key),
-          `${config.slug}: ${entry.name} — "${key}" is declared but no token wears it`);
-      }
-    }
-
-    const bySlug = new Map();
-    let noneCount = 0;
-    for (const [key, count] of observed) {
-      const art = resolver.of(key);
-      if (!art) {
-        noneCount += count;
-        continue;
-      }
-      const row = bySlug.get(art.slug) ?? { ...art, count: 0, ext: "png" };
-      row.count += count;
-      bySlug.set(art.slug, row);
-    }
-
-    // Deterministic order — this IS the wire format for look codes.
-    const traits = [...bySlug.values()]
-      .sort((a, b) => b.count - a.count || a.slug.localeCompare(b.slug));
-    assert(traits.length > 0, `${config.slug}: category ${entry.name} has no traits`);
-    assert(traits.length + 1 <= ALPHABET.length,
-      `${config.slug}: category ${entry.name} has ${traits.length} traits, over the ${ALPHABET.length}-char alphabet`);
-
-    return {
-      id: dirSlug(entry.name),
-      name: entry.name,
-      metaName: attrs.join(SEP),
-      label: entry.label ?? config.labels?.[entry.name] ?? entry.name,
-      dir: dirSlug(entry.name),
-      srcDir,
-      attrs,
-      resolve: (key) => resolver.of(key)?.slug ?? null,
-      focus: entry.focus,
-      noneCount,
-      optional: noneCount > 0,
-      traits,
-    };
+    return buildCategory(config, raw, observed);
   });
+
   const byName = new Map(categories.map((category) => [category.name, category]));
 
   const steps = config.stack.map((dirName) => {
@@ -835,7 +505,22 @@ function verifyRenders(built, sourceDir, sampleSize, override) {
 
 // -------------------------------------------------------------------- main
 
-function main() {
+/**
+ * Every trait type the sweep has to fetch for one source collection: the union
+ * across every config reading it, not just the one being built. Piggy SOL Gang
+ * keys on seven attributes; Piggy Gang re-skins the same metadata and keys its
+ * Body on "Received Mud" as well, so a per-config list would miss it.
+ */
+function traitTypesFor(source) {
+  const types = new Set();
+  for (const config of COLLECTIONS) {
+    if (config.source !== source) continue;
+    for (const raw of config.categories) for (const attr of attrsOf(entryOf(raw))) types.add(attr);
+  }
+  return [...types];
+}
+
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   // Every collection, every time: the manifest is rewritten wholesale, so a
   // partial run would silently drop the collections it skipped.
@@ -844,6 +529,28 @@ function main() {
   assert(fs.existsSync(sourceDir), `no such directory: ${sourceDir}`);
   const manifest = {};
 
+  // Per-token metadata, from the Indexer. Two collections' data builds three:
+  // Piggy Gang re-skins Piggy SOL Gang's tokens.
+  console.log(`reading metadata from ${args.indexer}`);
+  // The enabled collections, emitted into the manifest so lib/collections.ts can
+  // fail the build on a hand-authored `indexer` slug the API does not serve —
+  // an unknown slug is answered 200-with-no-rows, which would otherwise read as
+  // "you own none of these" forever.
+  const registry = await (await fetch(`${args.indexer}/v1/collections`, {
+    headers: { accept: "application/json" },
+  })).json();
+  const known = (registry.data ?? []).map((collection) => collection.slug).sort();
+  assert(known.length > 0, `${args.indexer}: /v1/collections returned nothing`);
+  for (const config of COLLECTIONS) {
+    assert(known.includes(config.source),
+      `${config.slug}: metadata source "${config.source}" is not served by ${args.indexer} (has ${known.join(", ")})`);
+  }
+
+  const itemsBySource = new Map();
+  for (const source of new Set(COLLECTIONS.map((config) => config.source))) {
+    itemsBySource.set(source, await loadItems(args.indexer, source, traitTypesFor(source), args));
+  }
+
   for (const config of COLLECTIONS) {
     assert(!config.externalArt || args.art[config.slug],
       `${config.slug}: pass --art ${config.slug}=<dir> — its art is not in the composer repo`);
@@ -851,8 +558,10 @@ function main() {
     assert(fs.existsSync(artDir), `no such directory: ${artDir}`);
 
     console.log(`\n${config.slug}`);
-    const built = buildCollection(config, sourceDir, artDir);
+    const built = buildCollection(config, artDir, itemsBySource.get(config.source));
     const { categories, items, supply } = built;
+    assert(supply === config.supply,
+      `${config.slug}: ${supply} tokens but the pin says ${config.supply}`);
     console.log(`  ${supply} tokens, ${categories.length} categories, ${categories.reduce((n, c) => n + c.traits.length, 0)} traits`);
     for (const category of categories) {
       console.log(`    ${category.id.padEnd(11)} ${String(category.traits.length).padStart(2)} traits`
@@ -863,16 +572,19 @@ function main() {
     console.log(`  wrote ${files} layers + ${files} thumbs`);
 
     // Stable regardless of tab order, which is presentation and may change.
-    const codeOrder = categories.map((category) => category.id).sort();
+    const codeOrder = codeOrderOf(categories);
     const { encode } = makeCodec(categories, codeOrder);
+    const codeHash = codeHashOf(categories, codeOrder);
 
-    const codeHash = createHash("sha256")
-      .update(JSON.stringify(codeOrder.map((id) => {
-        const category = categories.find((c) => c.id === id);
-        return [id, category.optional, category.traits.map((trait) => trait.slug)];
-      })))
-      .digest("hex")
-      .slice(0, 12);
+    // Before any write. The trait counts this is derived from now come from a
+    // live service, so an upstream re-index could reorder two adjacent traits
+    // and silently repoint every ?look= link ever shared and every committed
+    // tokens.txt row. Failing here is the guard; --accept-hash is the override.
+    assert(codeHash === config.codeHash || args.acceptHash,
+      `${config.slug}: codeHash ${codeHash} != the pinned ${config.codeHash}.\n`
+        + "  The index no longer produces the committed trait order, so every ?look= link\n"
+        + "  and every committed tokens.txt row would change meaning. Investigate with\n"
+        + "  `pnpm assets:check`. Pass --accept-hash only for a deliberate art change.");
 
     const bodyCategory = categories.find((category) => category.name === "Body");
     assert(bodyCategory, `${config.slug}: no Body category`);
@@ -895,7 +607,11 @@ function main() {
     assert(ids.every((id, i) => id === firstId + i), `${config.slug}: token ids are not contiguous`);
 
     const ranks = new Map();
-    [...scored].sort((a, b) => b.score - a.score).forEach((s, position) => ranks.set(s.id, position + 1));
+    // Ties broken by id so the rank of an exact-score pair is a property of the
+    // collection, not of the order the source happened to list them in.
+    [...scored]
+      .sort((a, b) => b.score - a.score || a.id - b.id)
+      .forEach((s, position) => ranks.set(s.id, position + 1));
 
     const stride = codeOrder.length + 3;
     const rows = new Array(supply);
@@ -911,27 +627,10 @@ function main() {
       `v1 ${config.slug} ${stride} ${firstId} ${supply} ${codeHash}\n${rows.join("")}\n`,
     );
 
-    // Which mint is which token, so a connected wallet resolves to token ids
-    // entirely offline — the RPC is only ever asked what the wallet holds, never
-    // what it is. Same fixed-stride shape as tokens.txt: row i is token
-    // firstId+i, so no id is stored. Only for collections whose mints are their
-    // own; Piggy Gang re-skins SOL Gang's and would duplicate the file.
-    let mints = null;
-    if (config.wallet) {
-      const mintRows = new Array(supply);
-      for (const s of scored) {
-        assert(typeof s.mint === "string" && s.mint.length > 0 && s.mint.length <= MINT_WIDTH,
-          `${config.slug}: token #${s.id} has no usable mint`);
-        mintRows[s.id - firstId] = s.mint.padEnd(MINT_WIDTH, " ");
-      }
-      assert(new Set(scored.map((s) => s.mint)).size === supply, `${config.slug}: mints are not unique`);
-      fs.writeFileSync(
-        path.join(ROOT, "public", "piggy", config.slug, "mints.txt"),
-        `v1 ${config.slug} ${MINT_WIDTH} ${firstId} ${supply}\n${mintRows.join("")}\n`,
-      );
-      mints = { path: `/piggy/${config.slug}/mints.txt`, width: MINT_WIDTH, firstId, count: supply };
-      console.log(`  wrote mints.txt (${supply} mints)`);
-    }
+    // No mint sidecar: which piggies a wallet holds is the Indexer's answer
+    // now, and it returns token numbers directly. `mint` survives on `scored`
+    // because verifyRenders() matches reference renders by filename.
+    assert(new Set(scored.map((s) => s.mint)).size === supply, `${config.slug}: mints are not unique`);
 
     const curve = scored.map((s) => s.score).sort((a, b) => a - b);
 
@@ -974,7 +673,6 @@ function main() {
       rarityCurve: Array.from({ length: 101 }, (_, i) =>
         Math.round(curve[Math.min(curve.length - 1, Math.floor((i / 100) * curve.length))] * 1e3) / 1e3),
       tokens: { path: `/piggy/${config.slug}/tokens.txt`, stride, firstId, count: supply },
-      mints,
     };
 
     manifest[config.slug] = entry;
@@ -990,9 +688,11 @@ function main() {
     path.join(ROOT, "lib", "collections.generated.ts"),
     "// GENERATED by scripts/import-assets.mjs — do not edit by hand.\n"
       + 'import type { GeneratedCollection } from "./collection-types";\n\n'
+      + "/** Collection slugs the Indexer serves, as of the last import. */\n"
+      + `export const INDEXER_COLLECTIONS: string[] = ${JSON.stringify(known)};\n\n`
       + `export const GENERATED: Record<string, GeneratedCollection> = ${JSON.stringify(manifest, null, 2)};\n`,
   );
   console.log("\nwrote lib/collections.generated.ts\n");
 }
 
-main();
+main().catch((cause) => fail(cause instanceof Error ? cause.message : String(cause)));

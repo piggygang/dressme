@@ -1,47 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import type { ReadyCollection } from "@/lib/collections";
-import { loadMintIndex } from "@/lib/mint-index";
 import { useWallet } from "./wallet-provider";
 
 /**
  * How many of this collection the connected wallet holds.
  *
- * Costs no RPC call — the provider already has the wallet's holdings, so this
- * is an intersection against the collection's mint index, or a plain length
- * where a Core read supplied the token ids pre-validated. Renders nothing
- * until there is something true to say.
+ * Costs no request of its own: the provider read every collection's holdings
+ * once for this address. Renders nothing until there is something true to say.
+ *
+ * `reported` rather than the row count, so the badge is right from the first
+ * page — the Indexer returns the per-collection totals unpaginated on every
+ * page, while the rows themselves may still be paging in.
  */
 export function OwnedCount({ collection }: { collection: ReadyCollection }) {
-  const { ownedMints, ownedCore } = useWallet();
-  // Keyed by the mints it counted, so it derives back to nothing on disconnect
-  // rather than needing a synchronous reset inside the effect.
-  const [tally, setTally] = useState<{ source: string[]; count: number } | null>(null);
+  const { holdings } = useWallet();
   const source = collection.wallet;
-  const mints = source?.kind === "mints" ? source : null;
-  const count = source?.kind === "core"
-    ? (ownedCore?.[source.collection]?.holdings.length ?? null)
-    : tally?.source === ownedMints
-      ? tally.count
-      : null;
-
-  useEffect(() => {
-    if (!mints || !ownedMints) return;
-    let live = true;
-    loadMintIndex(collection, mints)
-      .then((index) => {
-        if (!live) return;
-        setTally({
-          source: ownedMints,
-          count: ownedMints.reduce((total, mint) => total + (index.has(mint) ? 1 : 0), 0),
-        });
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [collection, mints, ownedMints]);
+  const count = source ? (holdings?.bySlug[source.slug]?.reported ?? null) : null;
 
   if (!count) return null;
 

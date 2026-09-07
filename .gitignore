@@ -42,3 +42,5 @@ yarn-error.log*
 next-env.d.ts
 
 .idea
+# Indexer metadata sweep cache (scripts/indexer-items.mjs)
+/.cache
