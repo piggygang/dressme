@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, type FormEvent } from "react";
+import { useEffect, useRef } from "react";
 import { useWallet } from "./wallet-provider";
 
 /**
- * Wallet chooser and connection settings.
+ * Wallet chooser.
  *
  * A native <dialog> rather than a hand-rolled overlay: it renders in the top
  * layer — so it clears the sticky header without the codebase gaining its first
@@ -14,17 +14,14 @@ import { useWallet } from "./wallet-provider";
  */
 const ROW =
   "flex w-full items-center gap-3 rounded-xl border border-line bg-surface-raised px-3 py-2.5 text-left text-sm transition-colors hover:border-brand hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand";
-const INPUT =
-  "min-w-0 flex-1 rounded-full border border-line bg-surface-raised px-3.5 py-2 text-sm placeholder:text-ink-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand";
 const ACTION =
   "shrink-0 rounded-full border border-line px-4 py-2 text-sm text-ink-muted transition-colors hover:border-brand hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand";
 
 const shorten = (address: string) => `${address.slice(0, 4)}…${address.slice(-4)}`;
 
 export function WalletModal() {
-  const { wallets, address, override, error, modalOpen, closeModal, connect, disconnect, saveEndpoint } = useWallet();
+  const { wallets, address, error, modalOpen, closeModal, connect, disconnect } = useWallet();
   const dialog = useRef<HTMLDialogElement>(null);
-  const field = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const element = dialog.current;
@@ -32,11 +29,6 @@ export function WalletModal() {
     if (modalOpen && !element.open) element.showModal();
     if (!modalOpen && element.open) element.close();
   }, [modalOpen]);
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    if (saveEndpoint(field.current?.value ?? "") && address) closeModal();
-  }
 
   return (
     <dialog
@@ -97,29 +89,6 @@ export function WalletModal() {
             ))}
           </ul>
         )}
-
-        <form onSubmit={submit} className="mt-5 border-t border-line pt-4">
-          <label htmlFor="wallet-rpc" className="block text-xs text-ink-muted">
-            Your own Solana RPC endpoint, if you would rather not use ours. Optional, stored
-            in this browser only, and used solely to list which tokens your wallet holds.
-          </label>
-          <div className="mt-2 flex gap-2">
-            <input
-              id="wallet-rpc"
-              ref={field}
-              // Uncontrolled, remounted each time the dialog opens, so the saved
-              // override is restored and an abandoned edit does not linger.
-              key={String(modalOpen)}
-              defaultValue={override}
-              placeholder="Using the built-in endpoint"
-              inputMode="url"
-              className={INPUT}
-            />
-            <button type="submit" className={ACTION}>
-              {override ? "Update" : "Use mine"}
-            </button>
-          </div>
-        </form>
 
         {error && (
           <p role="alert" className="mt-3 text-xs text-brand">

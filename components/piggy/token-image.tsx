@@ -21,18 +21,24 @@ const RENDER_BASE = process.env.NEXT_PUBLIC_RENDER_BASE_URL ?? "";
  */
 export function TokenImage({
   collection,
-  mint,
+  asset,
   equipped,
   alt,
 }: {
   collection: ReadyCollection;
-  /** `null` for a piggy with no minted render to fetch — a swapped Core asset. */
-  mint: string | null;
+  /**
+   * The piggy's on-chain address, which is what the bucket keys renders by.
+   * Ignored where the collection publishes none — Piggy Gang's bucket holds the
+   * art its redraw replaced, so asking for it would 404 on every tile.
+   */
+  asset: string | null;
   equipped: Equipped;
   alt: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = RENDER_BASE && mint ? `${RENDER_BASE}/${collection.slug}/${mint}.png` : "";
+  const src = RENDER_BASE && asset && collection.hasRenders
+    ? `${RENDER_BASE}/${collection.slug}/${asset}.png`
+    : "";
 
   if (!src || failed) {
     return <PiggyArt collection={collection} equipped={equipped} tier="thumb" />;

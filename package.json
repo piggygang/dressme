@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "assets:import": "node scripts/import-assets.mjs",
+    "assets:check": "node scripts/check-wire-format.mjs",
     "renders:upload": "node scripts/upload-renders.mjs"
   },
   "dependencies": {
