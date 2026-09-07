@@ -100,6 +100,39 @@ function describe(code: string | null, status: number): string {
   return "Could not read this wallet's piggies.";
 }
 
+/** Live, per-collection figures. Display only — never a rarity denominator. */
+export type CollectionStats = { supply: number; holders: number };
+
+/**
+ * Live supply and holder counts, keyed by Indexer slug.
+ *
+ * `supply` here excludes burned assets, so it is what exists right now rather
+ * than what was ever minted — Piggy SOL Gang's falls as piggies are swapped into
+ * Piggy Gang, which burns the original.
+ *
+ * Deliberately NOT the number the rarity maths divides by. `traitPercent()`,
+ * `lookScore()` and the editor's "rank N of ..." all use `collection.supply`,
+ * the constant the committed trait counts were computed against; dividing those
+ * counts by a live total would make a category's percentages sum to over 100%.
+ *
+ * Never throws. An unreachable index resolves to `{}` and every card falls back
+ * to its shipped number — which also means a dead index cannot fail the build,
+ * where this runs during prerendering.
+ */
+export async function getCollectionStats(): Promise<Record<string, CollectionStats>> {
+  try {
+    const body = await get("/v1/collections");
+    const rows = (body.data ?? []) as { slug: string; stats: CollectionStats | null }[];
+    return Object.fromEntries(
+      rows.flatMap((row) => (row.stats
+        ? [[row.slug, { supply: row.stats.supply, holders: row.stats.holders }] as const]
+        : [])),
+    );
+  } catch {
+    return {};
+  }
+}
+
 type Row = {
   number: number | null;
   address: string;

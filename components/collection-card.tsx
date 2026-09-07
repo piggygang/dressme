@@ -4,8 +4,16 @@ import { decodeLook, defaultEquipped, type Collection } from "@/lib/collections"
 import { PiggyArt } from "@/components/piggy/piggy-art";
 import { PiggyMark } from "@/components/brand/wordmark";
 import { OwnedCount } from "@/components/wallet/owned-count";
+import type { CollectionStats } from "@/lib/indexer";
 
-export function CollectionCard({ collection }: { collection: Collection }) {
+export function CollectionCard({
+  collection,
+  stats,
+}: {
+  collection: Collection;
+  /** Live figures keyed by Indexer slug; absent when the index was unreachable. */
+  stats?: Record<string, CollectionStats>;
+}) {
   const accent = { "--accent": collection.accent } as CSSProperties;
 
   if (collection.status === "coming-soon") {
@@ -33,6 +41,11 @@ export function CollectionCard({ collection }: { collection: Collection }) {
   }
 
   const equipped = decodeLook(collection, collection.heroLook) ?? defaultEquipped(collection);
+  // `wallet.slug` is validated against the Indexer registry at module load, so a
+  // miss here means the read failed, not that the slug is wrong.
+  const live = collection.wallet ? stats?.[collection.wallet.slug] : undefined;
+  // The shipped constant is the fallback, so an index outage looks like today.
+  const supply = live?.supply ?? collection.supply;
 
   return (
     <Link
@@ -54,17 +67,26 @@ export function CollectionCard({ collection }: { collection: Collection }) {
           <span className="flex items-baseline gap-2">
             <OwnedCount collection={collection} />
             <span className="font-mono text-xs text-ink-muted">
-              {collection.supply.toLocaleString("en-US")}
+              {supply.toLocaleString("en-US")}
             </span>
           </span>
         </div>
         <p className="text-sm text-ink-muted">{collection.tagline}</p>
-        <span className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-[var(--accent)]">
-          Dress up
-          <span aria-hidden="true" className="transition-transform group-hover:translate-x-0.5">
-            →
+        {/* Opposite the call to action rather than beside the supply, so the
+            title row does not carry three numbers once a wallet is connected. */}
+        <div className="mt-2 flex items-baseline justify-between gap-3">
+          <span className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--accent)]">
+            Dress up
+            <span aria-hidden="true" className="transition-transform group-hover:translate-x-0.5">
+              →
+            </span>
           </span>
-        </span>
+          {live && (
+            <span className="font-mono text-[11px] text-ink-muted">
+              {live.holders.toLocaleString("en-US")} holders
+            </span>
+          )}
+        </div>
       </div>
     </Link>
   );

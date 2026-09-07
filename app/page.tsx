@@ -4,8 +4,22 @@ import { SiteHeader } from "@/components/site-header";
 import { PiggyMark } from "@/components/brand/wordmark";
 import { ConnectButton } from "@/components/wallet/connect-button";
 import { COLLECTIONS } from "@/lib/collections";
+import { getCollectionStats } from "@/lib/indexer";
 
-export default function Home() {
+/**
+ * ISR. The cards carry live supply and holder counts, which move only as piggies
+ * are traded or swapped, so an hour is plenty — and this keeps the page
+ * prerendered rather than making it dynamic (only `revalidate = 0` would do
+ * that). Scoped to this leaf page: the `/dress/[collection]` routes are not in
+ * its segment chain and stay fully static.
+ */
+export const revalidate = 3600;
+
+export default async function Home() {
+  // The app's one server-side read. Resolves to {} if the index is unreachable,
+  // so the cards fall back to their shipped numbers and the build still passes.
+  const stats = await getCollectionStats();
+
   return (
     <>
       <SiteHeader>
@@ -31,7 +45,7 @@ export default function Home() {
           <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {COLLECTIONS.map((collection) => (
               <li key={collection.slug} className="flex">
-                <CollectionCard collection={collection} />
+                <CollectionCard collection={collection} stats={stats} />
               </li>
             ))}
           </ul>
